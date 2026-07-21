@@ -7,4 +7,5 @@ important outsources you'll require are:
 ⦿ requests-html (just from your preferred terminal)
 ⦿ bs4 and beuatifulsoup 
 ⦿ a new virtual environment thru venv
+⦿ maybe pypdf too
 ⦿ and the lovely github to assist you on the way
