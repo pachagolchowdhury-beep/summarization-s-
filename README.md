@@ -9,3 +9,11 @@ important outsources you'll require are:
 ⦿ a new virtual environment thru venv
 ⦿ maybe pypdf too
 ⦿ and the lovely github to assist you on the way
+
+checking back in to add some more pickups for the youtube video summarization tool
+⦿nltk
+⦿pytube
+⦿youtube transcript api
+⦿heapq
+⦿OpenAI
+urllib.parse
