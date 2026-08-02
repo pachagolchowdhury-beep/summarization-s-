@@ -1,0 +1,199 @@
+import os
+import re
+import nltk
+import pytube
+from youtube_transcript_api import YouTubeTranscriptApi
+from nltk.corpus import stopwords
+from nltk.tokenize import sent_tokenize, word_tokenize
+from nltk.probability import FreqDist
+from heapq import nlargest
+from urllib.parse import parse_qs, urlparse
+import textwrap
+from colorama import Fore, Style, init
+from openai import OpenAI
+
+
+
+init(autoreset=True)
+
+nltk.download('punkt', quiet=True)
+nltk.download('stopwords', quiet=True)
+
+
+
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key="drop your api key here!", 
+)
+
+
+def extract_video_id(url: str) -> str:
+    parsed_url = urlparse(url)
+
+    if parsed_url.netloc == 'youtu.be':
+        return parsed_url.path.lstrip('/')
+
+    if parsed_url.netloc in ('www.youtube.com', 'youtube.com'):
+        if parsed_url.path == '/watch':
+            video_id = parse_qs(parsed_url.query).get('v', [None])[0]
+            if video_id is None:
+                raise ValueError(f"Unable to extract video ID from URL: {url}")
+            return video_id
+        elif parsed_url.path.startswith('/embed/'):
+            return parsed_url.path.split('/')[2]
+        elif parsed_url.path.startswith('/v/'):
+            return parsed_url.path.split('/')[2]
+
+    match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11}).*", url)
+    if match:
+        return match.group(1)
+
+    raise ValueError(f"Unsupported YouTube URL: {url}")
+
+def get_transcript(video_id: str) -> str:
+    try:
+        fetched = YouTubeTranscriptApi.get_transcript(video_id)
+        return ' '.join([entry['text'] for entry in fetched])
+    except Exception as e:
+        return f"Error retrieving transcript: {str(e)}"
+
+def summarize_text_nltk(text: str, num_sentences: int = 5) -> str:
+    if not text or text.startswith("Error"):
+        return text
+
+    sentences = sent_tokenize(text)
+    if len(sentences) <= num_sentences:
+        return text
+
+    stop_words = set(stopwords.words('english'))
+    words = word_tokenize(text.lower())
+    words = [w for w in words if w.isalnum() and w not in stop_words]
+
+    freq = FreqDist(words)
+
+    sentence_scores = {}
+    for i, sentence in enumerate(sentences):
+        for word in word_tokenize(sentence.lower()):
+            if word in freq:
+                sentence_scores[i] = sentence_scores.get(i, 0) + freq[word]
+
+    top_indices = nlargest(num_sentences, sentence_scores, key=sentence_scores.get)
+    top_indices.sort()
+    summary = ' '.join([sentences[i] for i in top_indices])
+    return summary
+
+def summarize_text_ai(text: str, video_title: str, num_sentences: int = 5) -> str:
+    if not text or text.startswith("Error"):
+        return text
+
+    # Truncate if needed (200k chars is safe for most models)
+    max_chars = 200000
+    if len(text) > max_chars:
+        text = text[:max_chars]
+
+    prompt = f"""
+Please provide a concise summary of the following YouTube video transcript.
+Title: {video_title}
+Transcript:
+{text}
+Create a clear, informative summary that captures the main points and key insights from the video.
+Your summary should be approximately {num_sentences} sentences long.
+"""
+
+    try:
+        completion = client.chat.completions.create(
+            model="mistralai/mistral-small-3.1-24b-instruct:free",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return completion.choices[0].message.content
+    except Exception as e:
+        return f"Error generating AI summary: {str(e)}"
+
+def summarize_youtube_video(youtube_url: str, num_sentences: int = 5) -> dict:
+    try:
+        video_id = extract_video_id(youtube_url)
+    except Exception as e:
+        return {"error": str(e)}
+
+    transcript = get_transcript(video_id)
+    if transcript.startswith("Error"):
+        return {"error": transcript}
+
+    try:
+        yt = pytube.YouTube(youtube_url)
+        video_title = yt.title
+    except Exception:
+        video_title = "Unknown Title"
+
+    nltk_summary = summarize_text_nltk(transcript, num_sentences)
+    ai_summary = summarize_text_ai(transcript, video_title, num_sentences)
+
+    return {
+        "video_title": video_title,
+        "video_id": video_id,
+        "ai_summary": ai_summary,
+        "nltk_summary": nltk_summary,
+        "full_transcript_length": len(transcript.split()),
+        "nltk_summary_length": len(nltk_summary.split()),
+        "ai_summary_length": len(ai_summary.split()),
+    }
+
+def print_boxed_text(text: str, width: int = 80, title: str | None = None, color: str = Fore.RED):
+    wrapper = textwrap.TextWrapper(width=width - 4)
+    lines = wrapper.wrap(text)
+    horiz = '─' * (width - 2)
+
+    print(color + '┌' + horiz + '┐')
+    if title:
+        title_line = title.center(width - 2)
+        print(color + '│' + title_line + '│')
+        print(color + '├' + horiz + '┤')
+    for line in lines:
+        print(color + '│ ' + line.ljust(width - 4) + ' │')
+    print(color + '└' + horiz + '┘')
+
+def print_summary_result(result: dict, width: int = 100):
+    if 'error' in result:
+        print_boxed_text(f"Error: {result['error']}", width=width, title="ERROR", color=Fore.MAGENTA)
+        return
+
+    terminal_width = width
+
+    print(Fore.YELLOW + "=" * terminal_width)
+    title = (result.get('video_title') or 'YouTube Summary').center(terminal_width)
+    print(Fore.YELLOW + Style.BRIGHT + title)
+    print(Fore.YELLOW + "=" * terminal_width + "\n")
+
+    print(Fore.BLUE + "VIDEO INFORMATION".center(terminal_width))
+    print(f"Video ID: {result['video_id']}")
+    print(f"Transcript words: {result['full_transcript_length']}")
+    print(Fore.BLUE + "─" * terminal_width + "\n")
+
+    print(Fore.RED + Style.BRIGHT + "AI SUMMARY".center(terminal_width))
+    print(result['ai_summary'])
+    print(Fore.BLUE + "─" * terminal_width + "\n")
+
+    print(Fore.GREEN + Style.DIM + "NLTK SUMMARY".center(terminal_width))
+    print(result['nltk_summary'])
+    print(Fore.BLUE + "─" * terminal_width)
+
+
+
+if __name__ == '__main__':
+    try:
+        terminal_width = os.get_terminal_size().columns
+        terminal_width = max(60, min(terminal_width, 140))
+    except Exception:
+        terminal_width = 80
+
+    print(Fore.RED + Style.BRIGHT + "\n" + "=" * terminal_width)
+    print(Fore.RED + Style.BRIGHT + "YOUTUBE VIDEO SUMMARIZER".center(terminal_width))
+    print(Fore.RED + Style.BRIGHT + "=" * terminal_width + "\n")
+
+    youtube_url = input(Fore.MAGENTA + "Enter YouTube video URL: " + Fore.WHITE)
+    num_sentences_input = input(Fore.YELLOW + "Enter number of sentences for summaries (default 5): " + Fore.WHITE)
+    num_sentences = int(num_sentences_input) if num_sentences_input.strip() else 5
+
+    print(Fore.YELLOW + "\nFetching and analyzing video transcript... Please wait...\n")
+    result = summarize_youtube_video(youtube_url, num_sentences)
+    print_summary_result(result, width=terminal_width)
